@@ -5,6 +5,7 @@ from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import InstalledAppFlow
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
+from google.auth.exceptions import RefreshError
 
 import os
 import numpy as np
@@ -13,9 +14,15 @@ import fitz  # PyMuPDF for PDF processing
 from PIL import Image, ImageDraw
 import pytesseract
 import matplotlib.pyplot as plt
+from tkinter import filedialog
+
+
+from scanner import *
+from image_process import *
 
 """
 This program reads a somewhat messy PDF schedule and exports it to a Google calendar. 
+Here are all the functions to do so, but App_scan.py is the main file to run as it contains the GUI and the interactive part of the program.
 
 To make it work correctly, follow the procedure indicated on https://developers.google.com/calendar/api/quickstart/python
 A Google Cloud project needs to be set up and a credentials.json file saved in the home folder.
@@ -25,40 +32,78 @@ A Google Cloud project needs to be set up and a credentials.json file saved in t
 #############   SET UP   ##################
 
 MONTHS = ["janvier", "fevrier", "mars", "avril", "mai", "juin", "juillet", "aout", "septembre", "octobre", "novembre", "decembre"]
-GOOGLE_ACCOUNT = "account@gmail.com"
+GOOGLE_ACCOUNT = "vbarreau78@gmail.com"
 
 # If modifying these scopes, delete the file token.json.
 SCOPES = ["https://www.googleapis.com/auth/calendar"]
 
-creds = None
-# The file token.json stores the user's access and refresh tokens, and is
-# created automatically when the authorization flow completes for the first
-# time.
-if os.path.exists("token.json"):
-    creds = Credentials.from_authorized_user_file("token.json", SCOPES)
-# If there are no (valid) credentials available, let the user log in.
-if not creds or not creds.valid:
-    if creds and creds.expired and creds.refresh_token:
-        creds.refresh(Request())
-    else:
-        flow = InstalledAppFlow.from_client_secrets_file(
-            "credentials.json", SCOPES
-        )
-        creds = flow.run_local_server(port=0)
-    # Save the credentials for the next run
-    with open("token.json", "w") as token:
-        token.write(creds.to_json())
-try:
-    service = build("calendar", "v3", credentials=creds)
-except HttpError as error:
-    print(f"An error occurred: {error}")
-
 
 ############  FUNCTIONS  ################
 
+def check_token(path_list):
+    """
+    Check if the token.json file exists and load the credentials."""
+    creds = None
+    token_path = ""
+    # The file token.json stores the user's access and refresh tokens, and is
+    # created automatically when the authorization flow completes for the first
+    # time.
+    for path in path_list :
+        if os.path.exists(path):
+            token_path = path
+    if token_path != "" :
+        creds = Credentials.from_authorized_user_file(token_path, SCOPES)
+    return creds, token_path
+    
 
-def create_event(title: str, beg: str, end: str):
-    """Crée un évènement dans le calendrier référencé par l'API"""
+def set_up_google():
+    """
+    Set up the Google API
+        """
+    # The file token.json stores the user's access and refresh tokens, and is
+    # created automatically when the authorization flow completes for the first
+    # time.
+    creds, token_path = check_token(["token.json","D:/OneDrive/Documents/11 - Codes/HDJ_scan/ressources/token.json"])
+    # If there are no (valid) credentials available, let the user log in.
+    if not creds or not creds.valid:
+        if creds and creds.expired and creds.refresh_token:
+            try :
+                creds.refresh(Request())
+            except RefreshError :
+                os.remove(token_path)
+                creds , token_path = check_token([])
+                creds.refresh(Request())
+        else:
+            if os.path.exists( "credentials.json"):
+                creds_path =  "credentials.json"
+
+            elif os.path.exists("D:/OneDrive/Documents/11 - Codes/HDJ_scan/ressources/credentials.json") :
+                creds_path = "D:/OneDrive/Documents/11 - Codes/HDJ_scan/ressources/credentials.json"
+            else :
+                creds_path = filedialog.askopenfilename(
+                            title="Indiquez credentials.json", 
+                            filetypes=(("JSON file", "*.json")),
+                            initialdir="D:/OneDrive/Documents/11 - Codes/HDJ_scan/ressources",
+                            initialfile="",
+                            defaultextension="*.pdf",
+                            multiple=False,
+                        )
+            flow = InstalledAppFlow.from_client_secrets_file(
+               creds_path, SCOPES
+            )
+            creds = flow.run_local_server(port=0)
+        # Save the credentials for the next run
+        with open("token.json", "w") as token:
+            token.write(creds.to_json())
+    try:
+        service = build("calendar", "v3", credentials=creds)
+    except HttpError as error:
+        print(f"An error occurred: {error}")
+    return service
+
+
+def create_event(title: str, beg: str, end: str,service=set_up_google()):
+    """Creates an event in the calendar referenced by the API"""
 
     event = {
         'summary': title,
@@ -84,6 +129,11 @@ def pdf_to_image(pdf_path, dpi=300):
     """
     Converts a PDF page to a high-resolution image (PNG format).
     """
+    if pdf_path[-3:] == "png" or pdf_path[-3:] == "jpg":
+        img =  Image.open(pdf_path)
+        # img = process(img)
+        return img
+
     doc = fitz.open(pdf_path)
     page = doc[0]
 
@@ -101,16 +151,32 @@ def extract_text_from_image(image):
     text = pytesseract.image_to_string(image, lang="eng")  # Language doesn't matter so much
     return text
 
+def draw_box(draw, box, flag, width=2):
+    """
+    Draws bounding boxes on an image.
+
+    draw : ImageDraw.Draw()
+    box : array, [x, y, width, height]
+    """
+    x, y, w, h = box
+    if flag == 0:
+        color = 'red'
+    else:
+        color = 'green'
+    draw.rectangle([x, y, x + w, y + h], outline=color, width=width)
+
 
 def visualize_text_positions(img, ocr_data, output_image="output.png", lines=[], columns=[]):
     """
     Draws bounding boxes around detected text from OCR.
+
+    img : PIL.Image
+    ocr_data : 2D array, [x, y, w, h, text] for each box
     """
     draw = ImageDraw.Draw(img)
 
     for i in range(len(ocr_data)):
-        x, y, w, h, text = ocr_data[i]
-        draw.rectangle([x, y, x + w, y + h], outline="red", width=2)
+        draw_box(draw, ocr_data[i,:4], flag=1)
     for x in lines:
         draw.line([0, x, img.width, x], fill='red')
     for y in columns:
@@ -122,6 +188,24 @@ def visualize_text_positions(img, ocr_data, output_image="output.png", lines=[],
     plt.axis("off")
     #   plt.show()
 
+def visualize_events(img, events_array,line = None,column=None):
+    draw = ImageDraw.Draw(img)
+
+    for i in range(len(events_array)):
+        e = events_array[i]
+        b = e.box
+        draw_box(draw, b.unpack(), flag=e.flag)
+    
+    if line is not None :
+        for l in line :
+            draw.line([0, l, img.width, l], fill='blue')
+    if column is not None:
+        for c in column:
+            draw.line([c, 0, c, img.height], fill='blue')
+    
+    # Save and display the image
+    plt.imshow(img)
+    plt.axis("off")
 
 def extract(img):
     """
@@ -138,6 +222,35 @@ def extract(img):
     ocr_data = np.array(ocr_data,dtype=object)
     return ocr_data
 
+def get_separators(image) :
+
+    """
+    Identifies the horizontal and vertical separators in the image.
+    """
+    img_array = np.array(image.convert("L"))  # Convert image to grayscale
+    img_array = 255 - img_array  # Invert colors: text becomes white, background becomes black
+
+    # Sum pixel values along the vertical and horizontal axes
+    vertical_sum = np.sum(img_array, axis=0)
+    horizontal_sum = np.sum(img_array, axis=1)
+
+    critere_line = 255*image.width/2
+    critere_col = 255*image.height/3
+
+    # Identify columns and lines based on pixel intensity thresholds
+    columns = np.where(vertical_sum > critere_col)[0]
+    lines = np.where(horizontal_sum > critere_line)[0]
+
+    # draw = ImageDraw.Draw(image)
+    # for x in columns:
+    #     draw.line([x, 0, x, image.height], fill='red')
+    # for y in lines:
+    #     draw.line([0, y, image.width, y], fill='red')
+    # plt.imshow(image)
+    # plt.axis("off")
+    # plt.show()
+
+    return lines, columns
 
 def extract_and_visualize(pdf_path):
     """
@@ -257,12 +370,17 @@ def get_string_planning(pdf):
     Extracts and cleans the data from the pdf.
     returns : ndarray - 0 is x position of the text, 1 is the text
     """
-    img = pdf_to_image(pdf)
+    if pdf[-3:] == 'pdf':
+        img = pdf_to_image(pdf)
+    elif pdf[-3:] == 'png' or pdf[-3:] == 'jpg':
+        img = Image.open(pdf)
+    else:
+        print("\nFile format not supported\n")
+        return FileNotFoundError
+    
     data = extract(img)
-    columns = data[np.where(data[:, -1] == 'KINESITHERAPEUTE'), 0][0] - 10
-    time_pattern = re.compile(r'\d\d:00')
-    matches = np.array([bool(re.fullmatch(time_pattern, s)) for s in data[:, -1]])
-
+    
+    lines, columns = get_separators(img)
     # regroup sentences
     data = group_lines(data, x_threshold=300, y_threshold=50, columns=columns)
     # visualize_text_positions(img, data, output_image='step1.png', columns=columns)
@@ -270,16 +388,20 @@ def get_string_planning(pdf):
     # regroup logical boxes. This two step process allow for sligthly more efficient computuation.
     data2 = group_boxes(data, y_threshold=75, columns=columns)
 
+
     # visualize_text_positions(img, data2, output_image='step2.png') #debug
-    return data2[:, (0, -1)]
+    return data2
 
 
 def get_days_i(strings):
     """ 
-    returns the indices of the french dates strings in a list of strings.
+    Returns the indices of the French date strings in a list of strings, ensuring they are in order.
     """
     date_pattern = re.compile(r'\b\d{1,2}\s+(janvier|février|mars|avril|mai|juin|juillet|août|septembre|octobre|novembre|décembre)\b', re.IGNORECASE)
     indices = [i for i, s in enumerate(strings) if date_pattern.search(s) and "Le" not in s]
+
+    # Sort indices to ensure they are in order
+    indices.sort(key=lambda i: strings[i])
 
     return indices
 
@@ -295,60 +417,109 @@ def compact_string_day(s: str):
     return compacted_date
 
 
-def sort_planning(s: np.ndarray):
+def interpret_event_name(e:event):
+    """
+    Interprets the name of an event to extract the title and the time of the event.
+    """
+    e_str = e.name.split(' ')
+    e.beg = e_str[0]
+    e.end = e_str[2]
+    title = ""
+    for i in range(3, len(e_str)):
+        title += e_str[i] + " "
+    e.name = title
+
+
+def get_weeks(data: np.ndarray):
+    """ 
+    From get_string_planning raw data, returns the weeks of the planning.
+    """
+    s = data[:,(0,-1)]
+
+    # I identify which area of the document corresponds to which day of the week
+    days_i = get_days_i(s[:, -1])
+    days_i_sorted = np.zeros(len(days_i),dtype=int)
+    for i in days_i :
+        if "lundi" in s[i, -1].lower():
+            days_i_sorted[0] = i
+        elif "mardi" in s[i, -1].lower():
+            days_i_sorted[1] = i
+        elif "mercredi" in s[i, -1].lower():
+            days_i_sorted[2] = i
+        elif "jeudi" in s[i, -1].lower():
+            days_i_sorted[3] = i
+        elif "vendredi" in s[i, -1].lower():
+            days_i_sorted[4] = i
+    days_x = s[days_i_sorted, 0]
+    
+    week = []
+    try:
+        for i in range(5):
+            week.append(compact_string_day(s[days_i_sorted[i], -1]))
+    except:
+        print("Impossible de lire le planning. Si le fichier d'entrée est une photo, considérez utiliser une capture d'écran.")
+    return week, days_x
+
+
+def sort_planning(data: np.ndarray):
     """ 
     From get_string_planning raw data, formats a planning : a list of events with a column per day of the week.
     """
-    days_i = get_days_i(s[:, -1])
-    days_x = s[days_i, 0]
+    s = data[:,(0,-1)]
+    week, days_x = get_weeks(data)
 
+    # A text represents an event if it contains a time pattern
     time_pattern = re.compile(r'\d{2}:\d{2} - \d{2}:\d{2}')
-    events_s = [[s[i, 0], s[i, 1]] for i in range(len(s)) if time_pattern.search(s[i, 1])]
-    events_s = np.array(events_s, dtype=object)
-    planning = [[], [], [], [], []]
-    for i in range(len(events_s)):
-        spots = np.where(days_x >= events_s[i, 0])[0]
+    events_data = np.array([data[i] for i in range(len(s)) if time_pattern.search(s[i, 1])])
+    n = len(events_data)
+    events = np.zeros(n, dtype=event)
+    for i in range(len(events)):
+        name = events_data[i,-1]
+        x,y,w,h = events_data[i,:-1]
+        b2 = box(x,y,w,h)
+        events[i] = event(name,box=b2)
+
+    for i in range(len(events)):
+        spots = np.where(days_x >= events[i].box.x)[0]
         if len(spots) > 0:
-            planning[spots[0]].append(events_s[i, 1])
-
-    week = []
-    for i in range(5):
-        week.append(compact_string_day(s[days_i[i], -1]))
-
-    return planning, week
+            events[i].day = week[spots[0]]
+        interpret_event_name(events[i])
+    return events
 
 
-def string_to_event(event_s, compact_day):
+def string_to_event(e:event):
     """
     Creates an event on Google calendar.
-    envent_s : str, '00:00 - 01:00 Title of event
+    envent_s : str, '00:00 - 01:00 Title of event'
     compact day : str, 2025-01-01
     """
-    e = event_s.split(' ')
-    time_beg = e[0]
-    time_end = e[2]
-    title = ""
-    for i in range(3, len(e)):
-        title += e[i] + " "
-    date_beg = compact_day + "T" + time_beg + ":00"
-    date_end = compact_day + "T" + time_end + ":00"
+    assert type(e) == event
+    
 
-    create_event(title, date_beg, date_end)
+    date_beg = e.day + "T" + e.beg + ":00"
+    date_end = e.day + "T" + e.end + ":00"
+
+    create_event(e.name, date_beg, date_end)
 
 
-def planning_to_google(planning, week):
-    for i in range(5):
-        for event in planning[i]:
-            string_to_event(event, week[i])
+def planning_to_google(events_array):
+    for event in events_array:
+        if event.flag == 1:
+            string_to_event(event)
 
 
-def pdf_to_google(pdf):
+def file_to_google(pdf):
     string_data = get_string_planning(pdf)
-    p, week = sort_planning(string_data)
-    planning_to_google(p, week)
+    events_array = sort_planning(string_data)
+    planning_to_google(events_array)
 
 
 if __name__ == "__main__":
-    string_data = get_string_planning('test.pdf')
-    p, week = sort_planning(string_data)
-    string_to_event(p[2][1], week[2])
+    # debug 
+    file = filedialog.askopenfilename()
+    img = pdf_to_image(file)
+    string_data = get_string_planning(file)
+    events_array = sort_planning(string_data)
+    line,col = get_separators(img)
+    visualize_events(img, events_array,line,col)
+    plt.show()
