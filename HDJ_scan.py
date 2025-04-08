@@ -18,7 +18,6 @@ from tkinter import filedialog
 
 
 from scanner import *
-from image_process import *
 
 """
 This program reads a somewhat messy PDF schedule and exports it to a Google calendar. 
